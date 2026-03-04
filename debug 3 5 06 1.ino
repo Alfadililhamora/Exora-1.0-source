@@ -11,6 +11,11 @@ WebServer server(80);
 #define ENB 22
 #define BUZZER 32  // PIN BUZZER (bisa diganti sesuai kebutuhan)
 
+// ========== TAMBAHAN UNTUK LAMPU LED ==========
+#define LAMPU_PIN 12  // LED lampu mobil (GPIO12)
+bool lampuMenyala = true; // state awal: menyala
+// ========== AKHIR TAMBAHAN ==========
+
 const int SPEED_NORMAL = 255; 
 const int SPEED_BELOK  = 160; 
 
@@ -33,51 +38,85 @@ EyeState currentEyeState = EYE_IDLE_NORMAL;
 unsigned long idleStartTime = 0;
 bool wasMoving = false;
 
-// Fungsi gambar mata normal (tanpa pupil)
-void drawEyesNormal() {
+// Variabel animasi idle
+unsigned long lastIdleAnimTime = 0;
+int idleAnimState = 0; // 0: normal, 1: blink, 2: look left, 3: look right
+const unsigned long idleAnimInterval = 800; // ganti setiap 800ms
+
+// Fungsi gambar mata static (normal kotak penuh)
+void drawEyesStatic() {
   display.clearDisplay();
   // Mata kiri
-  display.drawCircle(42, 32, 12, SSD1306_WHITE);
+  display.fillRect(30, 16, 25, 25, SSD1306_WHITE);
   // Mata kanan
-  display.drawCircle(86, 32, 12, SSD1306_WHITE);
+  display.fillRect(73, 16, 25, 25, SSD1306_WHITE);
   display.display();
 }
 
-// Fungsi gambar mata marah / semangat saat bergerak
-void drawEyesMoving() {
+// Fungsi gambar mata marah (menyipit + alis)
+void drawEyesMarah() {
   display.clearDisplay();
-  // Lingkaran mata
-  display.drawCircle(42, 32, 12, SSD1306_WHITE);
-  display.drawCircle(86, 32, 12, SSD1306_WHITE);
-  // Alis marah (turun) dan pupil kecil menyala
-  display.drawLine(30, 20, 42, 26, SSD1306_WHITE); // alis kiri
-  display.drawLine(54, 26, 66, 20, SSD1306_WHITE); // alis kanan
-  display.fillCircle(42, 32, 4, SSD1306_WHITE);   // pupil kiri
-  display.fillCircle(86, 32, 4, SSD1306_WHITE);   // pupil kanan
+  // Mata menyipit (lebih pendek)
+  display.fillRect(30, 20, 25, 18, SSD1306_WHITE); // y=20, tinggi 18
+  display.fillRect(73, 20, 25, 18, SSD1306_WHITE);
+  // Alis marah (garis miring)
+  display.drawLine(25, 12, 50, 20, SSD1306_WHITE); // alis kiri
+  display.drawLine(78, 20, 103, 12, SSD1306_WHITE); // alis kanan
   display.display();
 }
 
-// Fungsi gambar mata ngantuk (interaksi lucu saat idle lama)
-void drawEyesSleepy() {
+// Fungsi gambar mata idle dengan animasi
+void drawEyesIdle() {
   display.clearDisplay();
-  // Lingkaran mata
-  display.drawCircle(42, 32, 12, SSD1306_WHITE);
-  display.drawCircle(86, 32, 12, SSD1306_WHITE);
-  // Pupil turun (mata setengah terpejam)
-  display.fillCircle(42, 38, 6, SSD1306_WHITE);
-  display.fillCircle(86, 38, 6, SSD1306_WHITE);
+  switch(idleAnimState) {
+    case 0: // normal
+      display.fillRect(30, 16, 25, 25, SSD1306_WHITE);
+      display.fillRect(73, 16, 25, 25, SSD1306_WHITE);
+      break;
+    case 1: // berkedip (mata jadi garis)
+      display.fillRect(30, 28, 25, 5, SSD1306_WHITE);
+      display.fillRect(73, 28, 25, 5, SSD1306_WHITE);
+      break;
+    case 2: // melihat kiri
+      display.fillRect(20, 16, 25, 25, SSD1306_WHITE);
+      display.fillRect(63, 16, 25, 25, SSD1306_WHITE);
+      break;
+    case 3: // melihat kanan
+      display.fillRect(40, 16, 25, 25, SSD1306_WHITE);
+      display.fillRect(83, 16, 25, 25, SSD1306_WHITE);
+      break;
+  }
   display.display();
 }
 
-// Fungsi update state mata berdasarkan pergerakan robot
+// Update animasi idle (ubah state secara acak)
+void updateIdleAnimation() {
+  if (millis() - lastIdleAnimTime > idleAnimInterval) {
+    lastIdleAnimTime = millis();
+    idleAnimState = random(0, 4); // 0-3
+  }
+}
+
+// Fungsi update state mata berdasarkan pergerakan robot dan obstacle
 void updateEyeState() {
+  // ===== TAMBAHAN PRIORITAS OBSTACLE =====
+  extern bool obstacleDetected;  // variabel dari HC-SR04
+  if (obstacleDetected) {
+    if (currentEyeState != EYE_MOVING) {
+      currentEyeState = EYE_MOVING;
+      drawEyesMarah();
+    }
+    return;
+  }
+  // ===== AKHIR TAMBAHAN =====
+
   bool moving = (millis() - lastCommandTime <= TIMEOUT_MS);
   
   if (moving) {
-    // Robot bergerak → tampilkan mata marah
-    if (currentEyeState != EYE_MOVING) {
-      currentEyeState = EYE_MOVING;
-      drawEyesMoving();
+    // Robot bergerak → tampilkan mata static (normal)
+    if (currentEyeState != EYE_IDLE_NORMAL) {
+      currentEyeState = EYE_IDLE_NORMAL;
+      drawEyesStatic();
     }
     wasMoving = true;
     idleStartTime = 0; // reset idle timer
@@ -88,37 +127,51 @@ void updateEyeState() {
       wasMoving = false;
       idleStartTime = millis();
       currentEyeState = EYE_IDLE_NORMAL;
-      drawEyesNormal();
+      drawEyesStatic();
     } else {
       // Sudah idle
       if (idleStartTime == 0) idleStartTime = millis();
       
       unsigned long idleDuration = millis() - idleStartTime;
-      if (idleDuration > 5000) {  // setelah 5 detik idle, mulai animasi ngantuk
-        // Siklus 4 detik: 1 detik sleepy, 3 detik normal
-        unsigned long cycleTime = (idleDuration - 5000) % 4000;
-        if (cycleTime < 1000) {
-          if (currentEyeState != EYE_SLEEPY) {
-            currentEyeState = EYE_SLEEPY;
-            drawEyesSleepy();
-          }
-        } else {
-          if (currentEyeState != EYE_IDLE_NORMAL) {
-            currentEyeState = EYE_IDLE_NORMAL;
-            drawEyesNormal();
-          }
-        }
+      if (idleDuration > 3000) {  // setelah 3 detik idle, mulai animasi lucu
+        updateIdleAnimation();
+        drawEyesIdle();
+        currentEyeState = EYE_SLEEPY; // gunakan state SLEEPY untuk animasi
       } else {
-        // Idle kurang dari 5 detik → mata normal
+        // Idle kurang dari 3 detik → mata static
         if (currentEyeState != EYE_IDLE_NORMAL) {
           currentEyeState = EYE_IDLE_NORMAL;
-          drawEyesNormal();
+          drawEyesStatic();
         }
       }
     }
   }
 }
 // ========== AKHIR TAMBAHAN ==========
+
+// ========== TAMBAHAN UNTUK HC-SR04 ==========
+#define TRIG_PIN 4
+#define ECHO_PIN 16
+
+bool obstacleDetected = false;
+float jarakTerakhir = 999;
+unsigned long lastSensorRead = 0;
+const unsigned long sensorInterval = 100; // baca setiap 100ms
+
+float bacaJarak() {
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  digitalWrite(TRIG_PIN, LOW);
+  long duration = pulseIn(ECHO_PIN, HIGH, 30000); // timeout 30ms
+  if (duration == 0) {
+    return 999; // tidak terdeteksi
+  }
+  float jarak = duration * 0.034 / 2;
+  return jarak;
+}
+// ========== AKHIR TAMBAHAN HC-SR04 ==========
 
 const char* ssid = "exora1.0";
 const char* password = "815297113";
@@ -134,10 +187,38 @@ void stopMotor() {
   applySpeed(0);
 }
 
-void maju() { lastCommandTime = millis(); applySpeed(SPEED_NORMAL); digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW); digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH); }
-void mundur() { lastCommandTime = millis(); applySpeed(SPEED_NORMAL); digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH); digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW); }
-void kiri() { lastCommandTime = millis(); applySpeed(SPEED_BELOK); digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW); digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW); }
-void kanan() { lastCommandTime = millis(); applySpeed(SPEED_BELOK); digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH); digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH); }
+// Fungsi maju dimodifikasi dengan pengecekan jarak
+void maju() {
+  if (jarakTerakhir < 40.0) {
+    // Terlalu dekat, tidak boleh maju
+    return;
+  }
+  lastCommandTime = millis();
+  applySpeed(SPEED_NORMAL);
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+}
+
+void mundur() {
+  lastCommandTime = millis();
+  applySpeed(SPEED_NORMAL);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+}
+
+void kiri() {
+  lastCommandTime = millis();
+  applySpeed(SPEED_BELOK);
+  digitalWrite(IN1, HIGH); digitalWrite(IN2, LOW);
+  digitalWrite(IN3, HIGH); digitalWrite(IN4, LOW);
+}
+
+void kanan() {
+  lastCommandTime = millis();
+  applySpeed(SPEED_BELOK);
+  digitalWrite(IN1, LOW); digitalWrite(IN2, HIGH);
+  digitalWrite(IN3, LOW); digitalWrite(IN4, HIGH);
+}
 
 // Fungsi Buzzer
 void buzzerOn() { 
@@ -178,6 +259,7 @@ void handleRoot() {
             --glass-bg: rgba(255, 255, 255, 0.05);
             --buzzer-red: #ff4444;
             --buzzer-orange: #ff8800;
+            --lampu-yellow: #ffaa00;
         }
 
         body {
@@ -229,20 +311,22 @@ void handleRoot() {
             box-shadow: 0 0 15px rgba(0, 255, 136, 0.3);
         }
 
-        /* --- Buzzer Button --- */
-        .buzzer-container {
+        /* --- Buzzer & Lampu Container --- */
+        .button-panel {
+            display: flex;
+            gap: 20px;
             margin-top: 20px;
             margin-bottom: 10px;
-            text-align: center;
+            flex-wrap: wrap;
+            justify-content: center;
         }
         
-        .buzzer-btn {
+        .buzzer-btn, .lampu-btn {
             width: 140px;
             height: 60px;
             border: none;
             border-radius: 30px;
             background: linear-gradient(145deg, #2a2a2a, #1a1a1a);
-            color: var(--buzzer-red);
             font-size: 24px;
             font-weight: bold;
             cursor: pointer;
@@ -252,8 +336,15 @@ void handleRoot() {
             justify-content: center;
             gap: 10px;
             transition: 0.1s;
-            margin: 0 auto;
             border: 1px solid #333;
+        }
+
+        .buzzer-btn {
+            color: var(--buzzer-red);
+        }
+
+        .lampu-btn {
+            color: var(--lampu-yellow);
         }
 
         .buzzer-btn:active {
@@ -264,6 +355,14 @@ void handleRoot() {
             border-color: var(--buzzer-red);
         }
 
+        .lampu-btn:active {
+            color: white;
+            background: var(--lampu-yellow);
+            box-shadow: 0 0 20px var(--lampu-yellow);
+            transform: translateY(4px);
+            border-color: var(--lampu-yellow);
+        }
+
         .buzzer-active {
             animation: buzzerPulse 0.5s infinite;
         }
@@ -272,6 +371,12 @@ void handleRoot() {
             0% { box-shadow: 0 0 10px var(--buzzer-red); }
             50% { box-shadow: 0 0 30px var(--buzzer-red); color: white; }
             100% { box-shadow: 0 0 10px var(--buzzer-red); }
+        }
+
+        .lampu-on {
+            background: var(--lampu-yellow) !important;
+            color: white !important;
+            box-shadow: 0 0 20px var(--lampu-yellow);
         }
 
         /* --- Controller Containers --- */
@@ -338,7 +443,7 @@ void handleRoot() {
                 margin: 0 auto;
             }
 
-            .buzzer-container {
+            .button-panel {
                 position: absolute;
                 bottom: 20px;
                 left: 0;
@@ -374,7 +479,7 @@ void handleRoot() {
             .horizontal { 
                 margin-top: 5px; 
             }
-            .buzzer-container {
+            .button-panel {
                 margin-top: 25px;
             }
         }
@@ -386,7 +491,7 @@ void handleRoot() {
                 height: 70px;
                 font-size: 18px;
             }
-            .buzzer-btn {
+            .buzzer-btn, .lampu-btn {
                 width: 120px;
                 height: 50px;
                 font-size: 20px;
@@ -401,12 +506,18 @@ void handleRoot() {
         <div id="status-box">STATUS: STANDBY</div>
     </div>
 
-    <!-- BUZZER BUTTON -->
-    <div class="buzzer-container">
+    <!-- Panel Tombol Buzzer dan Lampu -->
+    <div class="button-panel">
+        <!-- BUZZER BUTTON -->
         <button class="buzzer-btn" id="buzzerBtn"
             onmousedown="buzzerStart()" onmouseup="buzzerStop()" onmouseleave="buzzerStop()"
             ontouchstart="buzzerStart()" ontouchend="buzzerStop()" ontouchcancel="buzzerStop()">
             🔔 KLAKSON
+        </button>
+
+        <!-- LAMPU BUTTON -->
+        <button class="lampu-btn" id="lampuBtn" onclick="toggleLampu()">
+            💡 LAMPU
         </button>
     </div>
 
@@ -439,11 +550,18 @@ void handleRoot() {
 <script>
     const statusBox = document.getElementById('status-box');
     const buzzerBtn = document.getElementById('buzzerBtn');
+    const lampuBtn = document.getElementById('lampuBtn');
     let cmdInterval;
     let buzzerInterval;
     let currentPath = '';
     let isPressed = false;
     let isBuzzerPressed = false;
+    let lampuState = true; // true = menyala, false = mati
+
+    // Inisialisasi tampilan lampu
+    if (lampuState) {
+        lampuBtn.classList.add('lampu-on');
+    }
 
     // Fungsi untuk motor
     function holdStart(path, statusText) {
@@ -533,6 +651,20 @@ void handleRoot() {
         buzzerBtn.style.background = '';
     }
 
+    // Fungsi untuk toggle lampu
+    function toggleLampu() {
+        lampuState = !lampuState;
+        fetch('/lampu/toggle').catch(e => console.log('Gagal toggle lampu'));
+        
+        if (lampuState) {
+            lampuBtn.classList.add('lampu-on');
+        } else {
+            lampuBtn.classList.remove('lampu-on');
+        }
+        
+        if (navigator.vibrate) navigator.vibrate(20);
+    }
+
     function handleError() {
         if (isPressed) {
             isPressed = false;
@@ -568,6 +700,7 @@ void handleRoot() {
         }
         fetch('/stop').catch(e => {});
         fetch('/buzzer/off').catch(e => {});
+        // Lampu tidak perlu dimatikan, biarkan sesuai state terakhir
     });
 
     window.oncontextmenu = (e) => { e.preventDefault(); return false; };
@@ -590,7 +723,18 @@ void setup() {
   // Pin Buzzer
   pinMode(BUZZER, OUTPUT);
   digitalWrite(BUZZER, LOW);  // Buzzer mati di awal
+
+  // ===== TAMBAHAN SETUP HC-SR04 =====
+  pinMode(TRIG_PIN, OUTPUT);
+  pinMode(ECHO_PIN, INPUT);
+  digitalWrite(TRIG_PIN, LOW);
+  // ===== AKHIR TAMBAHAN =====
   
+  // ===== TAMBAHAN UNTUK LAMPU LED =====
+  pinMode(LAMPU_PIN, OUTPUT);
+  digitalWrite(LAMPU_PIN, HIGH);  // Lampu menyala default
+  // ===== AKHIR TAMBAHAN =====
+
   stopMotor();
 
   // ===== TAMBAHAN INISIALISASI OLED =====
@@ -598,7 +742,8 @@ void setup() {
   if(!display.begin(SSD1306_SWITCHCAPVCC, 0x3C)) {
     Serial.println("OLED tidak ditemukan, lanjut tanpa OLED");
   } else {
-    drawEyesNormal();  // tampilan awal mata normal
+    randomSeed(millis()); // untuk animasi random
+    drawEyesStatic();  // tampilan awal mata static
   }
   // ===== AKHIR TAMBAHAN =====
 
@@ -624,6 +769,14 @@ void setup() {
     server.send(200); 
   });
   
+  // ===== TAMBAHAN ENDPOINT LAMPU =====
+  server.on("/lampu/toggle", [](){ 
+    lampuMenyala = !lampuMenyala; 
+    digitalWrite(LAMPU_PIN, lampuMenyala ? HIGH : LOW); 
+    server.send(200); 
+  });
+  // ===== AKHIR TAMBAHAN =====
+  
   server.begin();
   
   Serial.println("Access Point dimulai");
@@ -634,6 +787,19 @@ void setup() {
 
 void loop() {
   server.handleClient();
+
+  // ===== TAMBAHAN HC-SR04 LOOP =====
+  if (millis() - lastSensorRead >= sensorInterval) {
+    lastSensorRead = millis();
+    jarakTerakhir = bacaJarak();
+    obstacleDetected = (jarakTerakhir < 40.0); // deteksi jika kurang dari 40 cm
+    
+    // Jika jarak kurang dari 40 cm, hentikan motor (darurat)
+    if (jarakTerakhir < 40.0) {
+      stopMotor();
+    }
+  }
+  // ===== AKHIR TAMBAHAN =====
 
   // ===== TAMBAHAN UPDATE MATA =====
   updateEyeState();
